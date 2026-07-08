@@ -1,0 +1,12 @@
+{
+    "name": "personal-knowledge-base",
+    "version": "0.1.0",
+    "private": true,
+    "packageManager": "pnpm@9.15.0",
+    "scripts": {
+        "dev": "pnpm --filter @pkb/web dev",
+        "build": "pnpm --filter @pkb/web build",
+        "lint": "pnpm --filter @pkb/web lint",
+        "typecheck": "pnpm --filter @pkb/web typecheck"
+    }
+}
