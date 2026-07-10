@@ -22,19 +22,35 @@ chunks into vector and keyword stores, and answer questions with citations.
 - Hybrid retrieval merge and citation fallback answer generation.
 - Next.js Web MVP for upload, document list, and chat.
 
-## Next Implementation Steps
+## Completed Wiring (end-to-end)
 
-1. Replace placeholder document endpoints with PostgreSQL-backed document persistence.
-2. Store uploaded files under `storage/docs` with stable document IDs.
-3. Run Alembic migrations against the local PostgreSQL container.
-4. Add Qdrant collection creation and upsert client.
-5. Add OpenSearch index creation and bulk indexing client.
-6. Wire upload jobs to the Docling ingestion pipeline.
-7. Persist `document_chunks` rows from `IndexBatch.chunk_records`.
-8. Replace placeholder `/search` with real `HybridRetriever` backends.
-9. Add an OpenAI-compatible LLM client for answer synthesis.
-10. Add end-to-end smoke tests using the local Docker stack.
-11. Add optional reranking and streaming once the synchronous MVP is stable.
+The placeholder API endpoints are now wired to real Postgres/Qdrant/OpenSearch and the
+ingestion pipeline. A `POST /documents` upload converts the file to markdown (direct
+read for `.md`/`.txt`, Docling for PDF), runs `IngestionPipeline.build_index_batch`,
+and persists chunk rows to Postgres plus vectors/keyword docs to Qdrant/OpenSearch.
+`GET /documents` reads from Postgres. `POST /search` runs the real `HybridRetriever`
+with the live Qdrant/OpenSearch backends. CORS is configured for the web origin.
+
+- Document endpoints backed by PostgreSQL persistence (`IngestionService`).
+- Uploaded files stored under `storage/docs/{document_id}/{filename}`.
+- Qdrant collection creation + vector upsert (`QdrantIndexer`).
+- OpenSearch index creation + bulk indexing (`OpenSearchIndexer`).
+- Upload wired to the Docling/markdown ingestion pipeline.
+- `document_chunks` rows persisted from `IndexBatch.chunk_records`.
+- `/search` backed by real `HybridRetriever` backends with graceful degradation
+  (returns no hits when a store is unreachable, so the endpoint stays up).
+- OpenAI-compatible embedding (`OpenAICompatibleEmbeddingProvider`) and LLM
+  (`LLMAnswerGenerator`) clients, opt-in via `EMBEDDING_*`/`LLM_*` settings;
+  local `HashEmbeddingProvider` and `SimpleAnswerGenerator` remain the defaults.
+
+## Remaining Implementation Steps
+
+1. Run Alembic migrations against the local PostgreSQL container
+   (`cd apps/api && uv run alembic upgrade head`) once Docker is up.
+2. Add end-to-end smoke tests using the local Docker stack.
+3. Add optional reranking and streaming once the synchronous MVP is stable.
+4. Asynchronous/background ingestion with job polling (uploads currently run
+   synchronously within the request).
 
 ## Verification Commands
 

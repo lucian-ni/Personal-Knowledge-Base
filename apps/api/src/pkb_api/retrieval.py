@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from pkb_ingestion.embeddings import EmbeddingProvider
 
 from pkb_api.schemas import ChunkCitation, SearchResult
+from pkb_api.settings import Settings
 
 
 @dataclass(frozen=True)
@@ -121,3 +122,89 @@ class SimpleAnswerGenerator:
                 for hit in hits
             ],
         )
+
+
+class LLMAnswerGenerator:
+    """Synthesizes a cited answer via an OpenAI-compatible ``/chat/completions`` endpoint.
+
+    Falls back to returning the raw context on transport errors so the search endpoint
+    never hard-fails purely because the LLM is unreachable.
+    """
+
+    def __init__(self, base_url: str, api_key: str, model: str, *, timeout: float = 60.0) -> None:
+        if not base_url or not api_key or not model:
+            raise ValueError("base_url, api_key, and model are required for LLM answers")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+
+    def answer(self, query: str, hits: list[RetrievalHit]) -> SearchResult:
+        citations = self._citations(hits)
+        if not hits:
+            return SearchResult(answer=f"No local context found for: {query}", citations=[])
+
+        import httpx
+
+        context = "\n\n".join(
+            f"[{index}] (chunk_id={hit.chunk_id}) {hit.text}"
+            for index, hit in enumerate(hits, start=1)
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Answer the user's question using only the provided context. "
+                    "Cite sources as [1], [2], ... matching the bracketed indices. "
+                    "If the context does not contain the answer, say so."
+                ),
+            },
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
+        ]
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={"model": self.model, "messages": messages, "temperature": 0.2},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload: dict[str, Any] = response.json()
+            answer = payload["choices"][0]["message"]["content"].strip()
+        except Exception:
+            answer = (
+                "LLM is configured but unreachable, so here are the most relevant "
+                f"local chunks:\n\n{context}"
+            )
+        return SearchResult(answer=answer, citations=citations)
+
+    @staticmethod
+    def _citations(hits: list[RetrievalHit]) -> list[ChunkCitation]:
+        return [
+            ChunkCitation(
+                document_id=hit.document_id,
+                chunk_id=hit.chunk_id,
+                title=hit.title,
+                section=hit.section,
+                page=hit.page,
+                text=hit.text,
+                score=hit.score,
+            )
+            for hit in hits
+        ]
+
+
+def make_answer_generator(settings: Settings) -> SimpleAnswerGenerator | LLMAnswerGenerator:
+    """Pick the answer generator based on settings; SimpleAnswerGenerator is the local fallback."""
+    if (
+        settings.llm_api_base_url
+        and settings.llm_api_key
+        and settings.llm_model
+        and settings.llm_api_base_url.strip()
+    ):
+        return LLMAnswerGenerator(
+            base_url=settings.llm_api_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+        )
+    return SimpleAnswerGenerator()
