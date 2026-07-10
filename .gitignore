@@ -17,6 +17,10 @@ node_modules/
 out/
 coverage/
 
+# TypeScript / Next.js generated files
+*.tsbuildinfo
+next-env.d.ts
+
 storage/docs/*
 !storage/docs/.gitkeep
 storage/derived/*
