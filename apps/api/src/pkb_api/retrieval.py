@@ -31,49 +31,71 @@ class KeywordSearchBackend(Protocol):
         """Return keyword search hits for a raw query."""
 
 
+class Reranker(Protocol):
+    def rerank(
+        self, query: str, hits: list[RetrievalHit], limit: int
+    ) -> list[RetrievalHit]:
+        """Re-score and re-order hits by relevance to the query."""
+
+
 class HybridRetriever:
+    """Hybrid retrieval: vector (Qdrant) + keyword (OpenSearch BM25) -> RRF fusion,
+    optionally followed by a cross-encoder rerank step.
+
+    When a ``reranker`` is configured, each backend is asked for ``rerank_top_k``
+    hits, RRF fuses them, the reranker re-scores, and the top ``limit`` are
+    returned. Without a reranker, RRF output is truncated to ``limit``.
+    """
+
     def __init__(
         self,
         embedding_provider: EmbeddingProvider,
         vector_search: VectorSearchBackend,
         keyword_search: KeywordSearchBackend,
+        *,
+        reranker: Reranker | None = None,
+        rrf_k: int = 60,
+        rerank_top_k: int = 20,
     ) -> None:
         self.embedding_provider = embedding_provider
         self.vector_search = vector_search
         self.keyword_search = keyword_search
+        self.reranker = reranker
+        self.rrf_k = rrf_k
+        self.rerank_top_k = rerank_top_k
 
     def search(self, query: str, limit: int = 8) -> list[RetrievalHit]:
         query_vector = self.embedding_provider.embed([query])[0]
-        vector_hits = self.vector_search.search(query_vector, limit)
-        keyword_hits = self.keyword_search.search(query, limit)
-        return merge_hybrid_hits(vector_hits, keyword_hits, limit=limit)
+        fetch = max(limit, self.rerank_top_k) if self.reranker else limit
+        vector_hits = self.vector_search.search(query_vector, fetch)
+        keyword_hits = self.keyword_search.search(query, fetch)
+        fused = rrf_fuse(
+            vector_hits, keyword_hits, k=self.rrf_k, limit=fetch
+        )
+        if self.reranker:
+            return self.reranker.rerank(query, fused, limit=limit)
+        return fused[:limit]
 
 
-def merge_hybrid_hits(
-    vector_hits: list[RetrievalHit],
-    keyword_hits: list[RetrievalHit],
-    limit: int,
-    vector_weight: float = 0.6,
-    keyword_weight: float = 0.4,
+def rrf_fuse(
+    *ranked_lists: list[RetrievalHit],
+    k: int = 60,
+    limit: int = 8,
 ) -> list[RetrievalHit]:
-    vector_scores = _normalize_scores(vector_hits)
-    keyword_scores = _normalize_scores(keyword_hits)
+    """Reciprocal Rank Fusion: score = sum(1 / (k + rank)) across retrievers.
+
+    ``rank`` is 1-based within each input list. Uses only rank (not score
+    magnitude), so it is robust to BM25 vs cosine score-scale differences.
+    Ties keep insertion order (first retriever wins).
+    """
+    scores: dict[str, float] = {}
     by_chunk: dict[str, RetrievalHit] = {}
-    combined_scores: dict[str, float] = {}
+    for hits in ranked_lists:
+        for rank, hit in enumerate(hits, start=1):
+            scores[hit.chunk_id] = scores.get(hit.chunk_id, 0.0) + 1.0 / (k + rank)
+            by_chunk.setdefault(hit.chunk_id, hit)
 
-    for hit in vector_hits:
-        by_chunk.setdefault(hit.chunk_id, hit)
-        combined_scores[hit.chunk_id] = combined_scores.get(hit.chunk_id, 0.0) + (
-            vector_scores[hit.chunk_id] * vector_weight
-        )
-
-    for hit in keyword_hits:
-        by_chunk.setdefault(hit.chunk_id, hit)
-        combined_scores[hit.chunk_id] = combined_scores.get(hit.chunk_id, 0.0) + (
-            keyword_scores[hit.chunk_id] * keyword_weight
-        )
-
-    ranked = sorted(combined_scores.items(), key=lambda item: item[1], reverse=True)
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     return [
         RetrievalHit(
             document_id=by_chunk[chunk_id].document_id,
@@ -83,19 +105,10 @@ def merge_hybrid_hits(
             page=by_chunk[chunk_id].page,
             text=by_chunk[chunk_id].text,
             score=score,
-            source="hybrid",
+            source="rrf",
         )
         for chunk_id, score in ranked[:limit]
     ]
-
-
-def _normalize_scores(hits: list[RetrievalHit]) -> dict[str, float]:
-    if not hits:
-        return {}
-    max_score = max(hit.score for hit in hits)
-    if max_score <= 0:
-        return {hit.chunk_id: 0.0 for hit in hits}
-    return {hit.chunk_id: hit.score / max_score for hit in hits}
 
 
 class SimpleAnswerGenerator:

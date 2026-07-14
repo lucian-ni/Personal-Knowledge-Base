@@ -18,15 +18,26 @@ class Settings(BaseSettings):
     storage_docs_path: Path = Path("storage/docs")
     storage_derived_path: Path = Path("storage/derived")
 
-    # Embedding provider selection. "hash" is a deterministic local provider used so
-    # tests never need a network model; "openai" routes to an OpenAI-compatible
-    # /embeddings endpoint. When using "openai", set EMBEDDING_DIMENSIONS to match
-    # the model so the Qdrant collection is created with the correct vector size.
-    embedding_provider: str = "hash"
-    embedding_dimensions: int = 1024
+    # Embedding. "local" runs bge-small-zh-v1.5 in-process (no network after the
+    # one-time model download); "openai" routes to an OpenAI-compatible
+    # /embeddings endpoint (set EMBEDDING_API_* and EMBEDDING_MODEL to the API
+    # model name). EMBEDDING_DIMENSIONS must match the model so the Qdrant
+    # collection is created with the right vector size.
+    embedding_provider: str = "local"
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_dimensions: int = 512
     embedding_api_base_url: str | None = None
     embedding_api_key: str | None = None
-    embedding_model: str | None = None
+
+    # Cross-encoder reranker (Qwen3-Reranker-0.6B). Disable to skip the model
+    # load for fast smoke tests; retrieval then returns RRF-fused hits directly.
+    reranker_enabled: bool = True
+    reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
+
+    # Retrieval tuning: RRF constant k, and how many hits each backend fetches
+    # before reranking.
+    rrf_k: int = 60
+    rerank_top_k: int = 20
 
     llm_api_base_url: str | None = None
     llm_api_key: str | None = None

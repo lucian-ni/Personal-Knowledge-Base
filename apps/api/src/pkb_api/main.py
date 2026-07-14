@@ -72,6 +72,9 @@ def search(
         embedding_provider=services.pipeline.embedding_provider,
         vector_search=services.vector_backend,
         keyword_search=services.keyword_backend,
+        reranker=services.reranker,
+        rrf_k=settings.rrf_k,
+        rerank_top_k=settings.rerank_top_k,
     )
     hits = retriever.search(request.query, limit=request.limit)
     return services.answer_generator.answer(request.query, hits)

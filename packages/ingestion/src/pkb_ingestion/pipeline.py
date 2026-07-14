@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pkb_ingestion.chunker import MarkdownChunker
 from pkb_ingestion.embeddings import EmbeddingProvider
+from pkb_ingestion.ids import qdrant_point_id
 from pkb_ingestion.index_contracts import build_opensearch_document, build_qdrant_payload
 from pkb_ingestion.models import Chunk, ChunkRecord, DocumentArtifact, IndexBatch, QdrantPoint
 
@@ -28,7 +29,7 @@ class IngestionPipeline:
             chunk_records=[self._chunk_record(chunk) for chunk in chunks],
             qdrant_points=[
                 QdrantPoint(
-                    id=chunk.chunk_id,
+                    id=qdrant_point_id(chunk.chunk_id),
                     vector=vector,
                     payload=build_qdrant_payload(chunk),
                 )
@@ -47,6 +48,6 @@ class IngestionPipeline:
             page=chunk.page,
             token_count=len(chunk.text.split()),
             checksum=chunk.checksum,
-            qdrant_point_id=chunk.chunk_id,
+            qdrant_point_id=qdrant_point_id(chunk.chunk_id),
             opensearch_document_id=chunk.chunk_id,
         )

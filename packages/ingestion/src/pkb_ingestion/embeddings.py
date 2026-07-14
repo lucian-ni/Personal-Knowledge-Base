@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import math
-import re
 from typing import Any, Protocol
-
-TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
 
 
 class EmbeddingProvider(Protocol):
@@ -15,33 +11,45 @@ class EmbeddingProvider(Protocol):
         """Return one embedding vector per input text."""
 
 
-class HashEmbeddingProvider:
-    """Deterministic local embeddings for development and smoke tests."""
+class LocalEmbeddingProvider:
+    """Local sentence embeddings via sentence-transformers (default bge-small-zh-v1.5).
 
-    def __init__(self, dimensions: int = 1024) -> None:
-        if dimensions <= 0:
-            raise ValueError("dimensions must be positive")
+    The model loads lazily on the first ``embed`` call and is cached by
+    HuggingFace (``~/.cache/huggingface``). In China set
+    ``HF_ENDPOINT=https://hf-mirror.com`` (and/or an HTTPS proxy) for the
+    download. Vectors are L2-normalized to match Qdrant's COSINE distance.
+
+    ``dimensions`` should match the model (512 for bge-small-zh-v1.5); it is
+    also refreshed from the loaded model so the Qdrant collection is created
+    with the correct vector size.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-small-zh-v1.5",
+        dimensions: int = 512,
+        *,
+        device: str | None = None,
+    ) -> None:
+        self.model_name = model_name
         self.dimensions = dimensions
+        self.device = device
+        self._model: Any = None
+
+    def _ensure_model(self) -> Any:
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(self.model_name, device=self.device)
+            self.dimensions = self._model.get_embedding_dimension()
+        return self._model
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [self._embed_one(text) for text in texts]
-
-    def _embed_one(self, text: str) -> list[float]:
-        vector = [0.0] * self.dimensions
-        tokens = TOKEN_RE.findall(text.lower())
-        if not tokens:
-            return vector
-
-        for token in tokens:
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            index = int.from_bytes(digest[:4], "big") % self.dimensions
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vector[index] += sign
-
-        norm = math.sqrt(sum(value * value for value in vector))
-        if norm == 0:
-            return vector
-        return [value / norm for value in vector]
+        if not texts:
+            return []
+        model = self._ensure_model()
+        vectors = model.encode(texts, normalize_embeddings=True)
+        return [list(v) for v in vectors]
 
 
 class OpenAICompatibleEmbeddingProvider:

@@ -25,8 +25,6 @@ def upgrade() -> None:
         "failed",
         name="ingestion_job_status",
     )
-    document_status.create(op.get_bind(), checkfirst=True)
-    ingestion_job_status.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "documents",

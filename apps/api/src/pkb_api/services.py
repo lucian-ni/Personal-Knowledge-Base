@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from opensearchpy import OpenSearch
 from pkb_ingestion.embeddings import (
     EmbeddingProvider,
-    HashEmbeddingProvider,
+    LocalEmbeddingProvider,
     OpenAICompatibleEmbeddingProvider,
 )
 from pkb_ingestion.pipeline import IngestionPipeline
@@ -17,7 +17,12 @@ from pkb_api.backends import (
     QdrantIndexer,
     QdrantVectorBackend,
 )
-from pkb_api.retrieval import LLMAnswerGenerator, SimpleAnswerGenerator, make_answer_generator
+from pkb_api.retrieval import (
+    LLMAnswerGenerator,
+    Reranker,
+    SimpleAnswerGenerator,
+    make_answer_generator,
+)
 from pkb_api.settings import Settings, settings
 from pkb_api.storage import DocumentStorage
 
@@ -27,7 +32,8 @@ class Services:
     """The wired collaborators the API endpoints depend on.
 
     Real instances are built lazily from settings; tests inject a fake ``Services``
-    via ``app.dependency_overrides`` so they never touch Postgres/Qdrant/OpenSearch.
+    via ``app.dependency_overrides`` so they never touch Postgres/Qdrant/OpenSearch
+    or load the local embedding/reranker models.
     """
 
     pipeline: IngestionPipeline
@@ -37,10 +43,11 @@ class Services:
     vector_backend: QdrantVectorBackend
     keyword_backend: OpenSearchKeywordBackend
     answer_generator: SimpleAnswerGenerator | LLMAnswerGenerator
+    reranker: Reranker | None
 
 
 def make_embedding_provider(config: Settings) -> EmbeddingProvider:
-    """Select the embedding provider from settings; defaults to the local hash provider."""
+    """Select the embedding provider from settings; defaults to the local bge model."""
     if (
         config.embedding_provider == "openai"
         and config.embedding_api_base_url
@@ -53,12 +60,25 @@ def make_embedding_provider(config: Settings) -> EmbeddingProvider:
             model=config.embedding_model,
             dimensions=config.embedding_dimensions,
         )
-    return HashEmbeddingProvider(dimensions=config.embedding_dimensions)
+    return LocalEmbeddingProvider(
+        model_name=config.embedding_model,
+        dimensions=config.embedding_dimensions,
+    )
+
+
+def make_reranker(config: Settings) -> Reranker | None:
+    """Build the cross-encoder reranker, or None when disabled."""
+    if not config.reranker_enabled:
+        return None
+    from pkb_api.reranker import QwenReranker
+
+    return QwenReranker(model_name=config.reranker_model)
 
 
 def build_services(config: Settings) -> Services:
     """Build a ``Services`` instance from settings. Clients are lazy - construction
-    does not connect, so importing the app (and the test suite) needs no live stores."""
+    does not connect or load models, so importing the app (and the test suite)
+    needs no live stores or model downloads."""
     embedding_provider = make_embedding_provider(config)
     pipeline = IngestionPipeline(embedding_provider=embedding_provider)
 
@@ -75,6 +95,7 @@ def build_services(config: Settings) -> Services:
     keyword_backend = OpenSearchKeywordBackend(opensearch_client, config.opensearch_index)
 
     answer_generator = make_answer_generator(config)
+    reranker = make_reranker(config)
 
     return Services(
         pipeline=pipeline,
@@ -84,6 +105,7 @@ def build_services(config: Settings) -> Services:
         vector_backend=vector_backend,
         keyword_backend=keyword_backend,
         answer_generator=answer_generator,
+        reranker=reranker,
     )
 
 

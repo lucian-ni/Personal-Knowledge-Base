@@ -11,7 +11,7 @@ from pkb_api.retrieval import RetrievalHit, SimpleAnswerGenerator
 from pkb_api.services import Services, get_services, make_embedding_provider
 from pkb_api.settings import settings
 from pkb_api.storage import DocumentStorage
-from pkb_ingestion.embeddings import HashEmbeddingProvider
+from pkb_ingestion.ids import qdrant_point_id
 from pkb_ingestion.models import QdrantPoint
 from pkb_ingestion.pipeline import IngestionPipeline
 from sqlalchemy import create_engine
@@ -27,6 +27,29 @@ class FakeStores:
         self.opensearch_docs: dict[str, dict] = {}
         self.collection_ensured = False
         self.index_ensured = False
+
+
+class FakeEmbeddingProvider:
+    """Deterministic in-process embedding for tests (no model download)."""
+
+    def __init__(self, dimensions: int = 16) -> None:
+        self.dimensions = dimensions
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        import hashlib
+
+        out: list[list[float]] = []
+        for text in texts:
+            vec = [0.0] * self.dimensions
+            for tok in text.split():
+                digest = hashlib.sha256(tok.encode()).digest()
+                idx = int.from_bytes(digest[:4], "big") % self.dimensions
+                vec[idx] += 1.0
+            norm = sum(v * v for v in vec) ** 0.5
+            if norm:
+                vec = [v / norm for v in vec]
+            out.append(vec)
+        return out
 
 
 class FakeQdrantIndexer:
@@ -89,13 +112,14 @@ def _build_fake_services(
 ) -> tuple[Services, FakeStores]:
     stores = FakeStores()
     services = Services(
-        pipeline=IngestionPipeline(embedding_provider=HashEmbeddingProvider(dimensions=16)),
+        pipeline=IngestionPipeline(embedding_provider=FakeEmbeddingProvider(dimensions=16)),
         storage=DocumentStorage(tmp_path),
         qdrant_indexer=FakeQdrantIndexer(stores, fail_upsert=fail_qdrant),
         opensearch_indexer=FakeOpenSearchIndexer(stores),
         vector_backend=FakeVectorBackend(stores),
         keyword_backend=FakeKeywordBackend(),
         answer_generator=SimpleAnswerGenerator(),
+        reranker=None,
     )
     return services, stores
 
@@ -149,11 +173,13 @@ def test_upload_then_list_then_search_round_trip(tmp_path: Path) -> None:
     document_id = job["document_id"]
     assert stores.collection_ensured
     assert stores.index_ensured
-    # Same stable_chunk_id is used as Qdrant point id and OpenSearch doc id.
-    assert list(stores.qdrant_points) == list(stores.opensearch_docs)
     chunk_id = f"{document_id}:000001"
-    assert chunk_id in stores.qdrant_points
-    assert stores.qdrant_points[chunk_id].payload["text"].startswith("ReentrantLock")
+    # Qdrant point id is a UUID derived from the stable chunk id; the stable
+    # chunk id is the cross-store join key (Qdrant payload chunkId == OpenSearch _id).
+    point = stores.qdrant_points[qdrant_point_id(chunk_id)]
+    assert point.payload["chunkId"] == chunk_id
+    assert point.payload["text"].startswith("ReentrantLock")
+    assert chunk_id in stores.opensearch_docs
 
     listed = client.get("/documents").json()
     assert len(listed) == 1
@@ -197,18 +223,31 @@ def test_store_failure_marks_document_failed(tmp_path: Path) -> None:
     assert listed[0]["status"] == "failed"
 
 
-def test_make_embedding_provider_defaults_to_hash() -> None:
+def test_search_returns_empty_citations_when_nothing_indexed(tmp_path: Path) -> None:
+    services, _ = _build_fake_services(tmp_path)
+    _install_overrides(services)
+
+    client = TestClient(app)
+    result = client.post("/search", json={"query": "anything", "limit": 5}).json()
+
+    assert result["citations"] == []
+
+
+def test_make_embedding_provider_defaults_to_local() -> None:
+    from pkb_ingestion.embeddings import LocalEmbeddingProvider
+
     provider = make_embedding_provider(settings)
-    assert isinstance(provider, HashEmbeddingProvider)
+    assert isinstance(provider, LocalEmbeddingProvider)
 
 
-def test_make_embedding_provider_returns_hash_when_openai_unconfigured() -> None:
+def test_make_embedding_provider_falls_back_to_local_when_openai_unconfigured() -> None:
     from pkb_api.settings import Settings
+    from pkb_ingestion.embeddings import LocalEmbeddingProvider
 
     provider = make_embedding_provider(
         Settings(embedding_provider="openai", embedding_dimensions=64)
     )
-    assert isinstance(provider, HashEmbeddingProvider)
+    assert isinstance(provider, LocalEmbeddingProvider)
 
 
 def test_make_embedding_provider_builds_http_when_configured() -> None:
