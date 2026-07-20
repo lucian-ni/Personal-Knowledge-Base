@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     opensearch_url: str = "http://localhost:9200"
     opensearch_index: str = "pkb_chunks"
     storage_docs_path: Path = Path("storage/docs")
-    storage_derived_path: Path = Path("storage/derived")
 
     # Embedding. "local" runs bge-small-zh-v1.5 in-process (no network after the
     # one-time model download); "openai" routes to an OpenAI-compatible

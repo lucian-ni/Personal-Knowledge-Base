@@ -1,13 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import type { SearchResult } from "@/lib/api";
-import { searchKnowledgeBase } from "@/lib/api";
+import type { ChunkCitation } from "@/lib/api";
+import { streamSearch } from "@/lib/api";
 
 export function ChatPanel() {
     const [query, setQuery] = useState("");
-    const [result, setResult] = useState<SearchResult | null>(null);
+    const [answer, setAnswer] = useState("");
+    const [citations, setCitations] = useState<ChunkCitation[]>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -15,8 +17,17 @@ export function ChatPanel() {
             return;
         }
         setIsLoading(true);
+        setAnswer("");
+        setCitations([]);
+        setError(null);
         try {
-            setResult(await searchKnowledgeBase(query));
+            // Citations stream first, then the answer token-by-token.
+            await streamSearch(query, {
+                onCitations: setCitations,
+                onDelta: (delta) => setAnswer((prev) => prev + delta)
+            });
+        } catch {
+            setError("Search failed. Is the API running?");
         } finally {
             setIsLoading(false);
         }
@@ -33,25 +44,26 @@ export function ChatPanel() {
             <button className="button" type="submit" disabled={isLoading}>
                 {isLoading ? "Searching..." : "Ask"}
             </button>
-            {result ? (
+            {error ? <p className="muted">{error}</p> : null}
+            {answer ? (
                 <section className="stack">
                     <h3>Answer</h3>
-                    <p>{result.answer}</p>
+                    <p>{answer}</p>
+                </section>
+            ) : null}
+            {citations.length > 0 ? (
+                <section className="stack">
                     <h3>Citations</h3>
-                    {result.citations.length === 0 ? (
-                        <p className="muted">No citations yet. Upload and ingest documents first.</p>
-                    ) : (
-                        result.citations.map((citation) => (
-                            <article className="citation" key={citation.chunk_id}>
-                                <strong>{citation.title}</strong>
-                                <p>{citation.text}</p>
-                                <p className="muted">
-                                    {citation.section ?? "Untitled section"}
-                                    {citation.page ? `, page ${citation.page}` : ""}
-                                </p>
-                            </article>
-                        ))
-                    )}
+                    {citations.map((citation) => (
+                        <article className="citation" key={citation.chunk_id}>
+                            <strong>{citation.title}</strong>
+                            <p>{citation.text}</p>
+                            <p className="muted">
+                                {citation.section ?? "Untitled section"}
+                                {citation.page ? `, page ${citation.page}` : ""}
+                            </p>
+                        </article>
+                    ))}
                 </section>
             ) : null}
         </form>

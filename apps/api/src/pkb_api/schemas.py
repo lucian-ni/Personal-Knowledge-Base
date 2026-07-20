@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 class HealthResponse(BaseModel):
     status: str = "ok"
+    stores: dict[str, bool] = Field(default_factory=dict)
 
 
 class DocumentRead(BaseModel):

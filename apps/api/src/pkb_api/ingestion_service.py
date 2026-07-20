@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from pkb_ingestion.docling_converter import DoclingMarkdownConverter
 from pkb_ingestion.models import ChunkRecord, DocumentArtifact
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from pkb_api.models import Document, DocumentChunk, DocumentStatus, IngestionJob, JobStatus
 from pkb_api.schemas import DocumentRead, IngestionJobRead
 from pkb_api.services import Services
+
+logger = logging.getLogger(__name__)
 
 MARKDOWN_SUFFIXES = {".md", ".markdown"}
 TEXT_SUFFIXES = {".txt"}
@@ -28,15 +32,34 @@ class UnsupportedDocumentError(Exception):
     """Raised when an uploaded file type cannot be converted to markdown."""
 
 
-class IngestionService:
-    """Orchestrates a single document ingestion: convert -> chunk -> embed -> persist.
+@dataclass
+class PreparedIngestion:
+    """State handed from the upload request to the background ingestion task.
 
-    The pipeline itself is a pure transform; this service owns the side effects of
-    writing to Postgres (document + chunks + job), Qdrant (vectors), and OpenSearch
-    (keyword index). Cross-store writes are best-effort: Postgres chunk rows are
-    committed only on full success, while Qdrant/OpenSearch upserts may leave
-    orphaned points if a later step fails (dedup by stable_chunk_id makes a
-    re-ingest idempotent).
+    The request creates the document + job rows (status ``running``), saves the raw
+    file, and returns immediately (HTTP 202). The heavy work (convert -> chunk ->
+    embed -> persist) runs in the background via ``IngestionService.run_ingestion``.
+    """
+
+    job: IngestionJobRead
+    document_id: str
+    job_id: str
+    kind: str
+    data: bytes
+    source_path: Path
+    title: str
+
+
+class IngestionService:
+    """Orchestrates document ingestion and deletion across all three stores.
+
+    Ingestion is split: ``prepare_ingest`` does the fast, request-synchronous work
+    (validate, create rows, save file) and returns a ``PreparedIngestion``;
+    ``run_ingestion`` does the heavy work in its own session as a FastAPI background
+    task. Cross-store writes are best-effort: on failure any chunks already written
+    to Qdrant/OpenSearch are cleaned up so a ``failed`` document never leaks
+    searchable hits. Re-ingest is idempotent because all stores key on the stable
+    chunk ID (Qdrant by the derived UUID point ID).
     """
 
     def __init__(
@@ -47,13 +70,20 @@ class IngestionService:
         self.services = services
         self.converter = converter or DoclingMarkdownConverter()
 
-    def ingest(
+    # -- ingestion -----------------------------------------------------------
+
+    def prepare_ingest(
         self,
         session: Session,
         filename: str,
         content_type: str | None,
         data: bytes,
-    ) -> IngestionJobRead:
+    ) -> PreparedIngestion:
+        """Fast, request-synchronous setup: validate, create rows, save the file.
+
+        Raises ``UnsupportedDocumentError`` (-> 415) for unknown types. Does NOT do
+        the heavy convert/embed/persist work; that runs in ``run_ingestion``.
+        """
         mime_type = content_type or "application/octet-stream"
         # Validate up front so unsupported types 415 without leaving a failed row.
         kind = self._classify(filename, mime_type)
@@ -79,21 +109,6 @@ class IngestionService:
             source_path = self.services.storage.save(document_id, filename, data)
             document.file_path = str(source_path)
             session.commit()
-
-            artifact = self._to_artifact(document_id, title, source_path, kind, data)
-            batch = self.services.pipeline.build_index_batch(artifact)
-
-            # Ensure stores exist before writing anything, so a missing store fails early.
-            self.services.qdrant_indexer.ensure_collection()
-            self.services.opensearch_indexer.ensure_index()
-
-            session.add_all([_chunk_to_orm(document_id, rec) for rec in batch.chunk_records])
-            self.services.qdrant_indexer.upsert(batch.qdrant_points)
-            self.services.opensearch_indexer.bulk_index(batch.opensearch_documents)
-
-            document.status = DocumentStatus.ready
-            job.status = JobStatus.completed
-            session.commit()
         except Exception as exc:
             session.rollback()
             document.status = DocumentStatus.failed
@@ -102,11 +117,94 @@ class IngestionService:
             session.commit()
             raise
 
-        return IngestionJobRead(
-            id=job.id,
+        return PreparedIngestion(
+            job=IngestionJobRead(id=job.id, document_id=document_id, status=str(job.status)),
             document_id=document_id,
-            status=str(job.status),
+            job_id=job.id,
+            kind=kind,
+            data=data,
+            source_path=source_path,
+            title=title,
         )
+
+    def run_ingestion(self, prep: PreparedIngestion) -> None:
+        """Heavy ingestion (convert -> chunk -> embed -> persist) in its own session.
+
+        Runs as a FastAPI background task after the upload response is sent. Updates
+        the document/job to ``completed`` or, on failure, ``failed`` and cleans up
+        any chunks already written to Qdrant/OpenSearch.
+        """
+        with self.services.session_factory() as session:
+            document = session.get(Document, prep.document_id)
+            job = session.get(IngestionJob, prep.job_id)
+            if document is None or job is None:
+                logger.warning("Ingestion target missing for document %s", prep.document_id)
+                return
+            try:
+                artifact = self._to_artifact(
+                    prep.document_id, prep.title, prep.source_path, prep.kind, prep.data
+                )
+                batch = self.services.pipeline.build_index_batch(artifact)
+
+                # Ensure stores exist before writing anything, so a missing store fails early.
+                self.services.qdrant_indexer.ensure_collection()
+                self.services.opensearch_indexer.ensure_index()
+
+                session.add_all(
+                    [_chunk_to_orm(prep.document_id, rec) for rec in batch.chunk_records]
+                )
+                self.services.qdrant_indexer.upsert(batch.qdrant_points)
+                self.services.opensearch_indexer.bulk_index(batch.opensearch_documents)
+
+                document.status = DocumentStatus.ready
+                job.status = JobStatus.completed
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                # Re-fetch after rollback so status updates land on fresh instances.
+                self._cleanup_search_stores(prep.document_id)
+                document = session.get(Document, prep.document_id)
+                job = session.get(IngestionJob, prep.job_id)
+                if document is not None:
+                    document.status = DocumentStatus.failed
+                if job is not None:
+                    job.status = JobStatus.failed
+                    job.failure_reason = str(exc)[:1000]
+                session.commit()
+                logger.exception("Ingestion failed for document %s", prep.document_id)
+
+    def _cleanup_search_stores(self, document_id: str) -> None:
+        """Best-effort removal of any Qdrant points / OpenSearch docs for a document.
+
+        Both backends swallow transport errors, so this never raises. Called on
+        ingestion failure (so a failed doc has no searchable orphans) and on delete.
+        """
+        self.services.qdrant_indexer.delete_by_document(document_id)
+        self.services.opensearch_indexer.delete_by_document(document_id)
+
+    # -- deletion ------------------------------------------------------------
+
+    def delete_document(self, session: Session, document_id: str) -> bool:
+        """Remove a document from Postgres + both search stores + the filesystem.
+
+        Returns False if the document does not exist. Search-store and file removal
+        are best-effort (never raise) so a delete succeeds even if a store is down.
+        """
+        document = session.get(Document, document_id)
+        if document is None:
+            return False
+        # Chunks cascade via the Document.chunks relationship (delete-orphan). Jobs
+        # have no relationship, so delete them explicitly. Both work on SQLite (FK
+        # CASCADE is off in tests) and Postgres.
+        session.execute(delete(IngestionJob).where(IngestionJob.document_id == document_id))
+        session.delete(document)
+        session.commit()
+
+        self._cleanup_search_stores(document_id)
+        self.services.storage.delete(document_id)
+        return True
+
+    # -- helpers -------------------------------------------------------------
 
     def _classify(self, filename: str, mime_type: str) -> str:
         suffix = Path(filename).suffix.lower()

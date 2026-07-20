@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -111,6 +113,21 @@ def rrf_fuse(
     ]
 
 
+def build_citations(hits: list[RetrievalHit]) -> list[ChunkCitation]:
+    return [
+        ChunkCitation(
+            document_id=hit.document_id,
+            chunk_id=hit.chunk_id,
+            title=hit.title,
+            section=hit.section,
+            page=hit.page,
+            text=hit.text,
+            score=hit.score,
+        )
+        for hit in hits
+    ]
+
+
 class SimpleAnswerGenerator:
     def answer(self, query: str, hits: list[RetrievalHit]) -> SearchResult:
         if not hits:
@@ -122,26 +139,25 @@ class SimpleAnswerGenerator:
                 "LLM is not configured, so here are the most relevant local chunks:\n\n"
                 f"{snippets}"
             ),
-            citations=[
-                ChunkCitation(
-                    document_id=hit.document_id,
-                    chunk_id=hit.chunk_id,
-                    title=hit.title,
-                    section=hit.section,
-                    page=hit.page,
-                    text=hit.text,
-                    score=hit.score,
-                )
-                for hit in hits
-            ],
+            citations=build_citations(hits),
         )
+
+    def stream_answer(self, query: str, hits: list[RetrievalHit]) -> Iterator[str]:
+        """Yield the answer in one or two chunks (no LLM to stream token-by-token)."""
+        if not hits:
+            yield f"No local context found for: {query}"
+            return
+        yield "LLM is not configured, so here are the most relevant local chunks:\n\n"
+        yield "\n\n".join(f"[{index}] {hit.text}" for index, hit in enumerate(hits, start=1))
 
 
 class LLMAnswerGenerator:
     """Synthesizes a cited answer via an OpenAI-compatible ``/chat/completions`` endpoint.
 
     Falls back to returning the raw context on transport errors so the search endpoint
-    never hard-fails purely because the LLM is unreachable.
+    never hard-fails purely because the LLM is unreachable. ``answer`` does a single
+    request; ``stream_answer`` streams token deltas (``stream: true``) for the SSE
+    endpoint. Both reuse a shared ``httpx.Client`` (one connection across searches).
     """
 
     def __init__(self, base_url: str, api_key: str, model: str, *, timeout: float = 60.0) -> None:
@@ -151,14 +167,16 @@ class LLMAnswerGenerator:
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self._client: Any = None
 
-    def answer(self, query: str, hits: list[RetrievalHit]) -> SearchResult:
-        citations = self._citations(hits)
-        if not hits:
-            return SearchResult(answer=f"No local context found for: {query}", citations=[])
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            import httpx
 
-        import httpx
+            self._client = httpx.Client(timeout=self.timeout)
+        return self._client
 
+    def _messages(self, query: str, hits: list[RetrievalHit]) -> tuple[list[dict[str, str]], str]:
         context = "\n\n".join(
             f"[{index}] (chunk_id={hit.chunk_id}) {hit.text}"
             for index, hit in enumerate(hits, start=1)
@@ -174,8 +192,17 @@ class LLMAnswerGenerator:
             },
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"},
         ]
+        return messages, context
+
+    def answer(self, query: str, hits: list[RetrievalHit]) -> SearchResult:
+        citations = build_citations(hits)
+        if not hits:
+            return SearchResult(answer=f"No local context found for: {query}", citations=[])
+
+        messages, context = self._messages(query, hits)
         try:
-            response = httpx.post(
+            client = self._ensure_client()
+            response = client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={"model": self.model, "messages": messages, "temperature": 0.2},
@@ -191,20 +218,49 @@ class LLMAnswerGenerator:
             )
         return SearchResult(answer=answer, citations=citations)
 
-    @staticmethod
-    def _citations(hits: list[RetrievalHit]) -> list[ChunkCitation]:
-        return [
-            ChunkCitation(
-                document_id=hit.document_id,
-                chunk_id=hit.chunk_id,
-                title=hit.title,
-                section=hit.section,
-                page=hit.page,
-                text=hit.text,
-                score=hit.score,
+    def stream_answer(self, query: str, hits: list[RetrievalHit]) -> Iterator[str]:
+        """Stream answer token deltas from the LLM (OpenAI-compatible SSE).
+
+        Falls back to yielding the raw context if the LLM is unreachable, so the
+        streaming endpoint never hard-fails.
+        """
+        if not hits:
+            yield f"No local context found for: {query}"
+            return
+
+        messages, context = self._messages(query, hits)
+        try:
+            client = self._ensure_client()
+            with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "stream": True,
+                },
+                timeout=self.timeout,
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[len("data: ") :]
+                    if data.strip() == "[DONE]":
+                        break
+                    chunk = json.loads(data)
+                    delta = (
+                        chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                    )
+                    if delta:
+                        yield delta
+        except Exception:
+            yield (
+                "LLM is configured but unreachable, so here are the most relevant "
+                f"local chunks:\n\n{context}"
             )
-            for hit in hits
-        ]
 
 
 def make_answer_generator(settings: Settings) -> SimpleAnswerGenerator | LLMAnswerGenerator:

@@ -66,17 +66,40 @@ class FakeQdrantIndexer:
         for point in points:
             self.stores.qdrant_points[point.id] = point
 
+    def delete_by_document(self, document_id: str) -> None:
+        self.stores.qdrant_points = {
+            pid: p
+            for pid, p in self.stores.qdrant_points.items()
+            if p.payload.get("docId") != document_id
+        }
+
+    def health(self) -> bool:
+        return True
+
 
 class FakeOpenSearchIndexer:
-    def __init__(self, stores: FakeStores) -> None:
+    def __init__(self, stores: FakeStores, *, fail_bulk: bool = False) -> None:
         self.stores = stores
+        self.fail_bulk = fail_bulk
 
     def ensure_index(self) -> None:
         self.stores.index_ensured = True
 
     def bulk_index(self, documents: list[dict]) -> None:
+        if self.fail_bulk:
+            raise RuntimeError("opensearch unreachable")
         for doc in documents:
             self.stores.opensearch_docs[doc["_id"]] = doc["document"]
+
+    def delete_by_document(self, document_id: str) -> None:
+        self.stores.opensearch_docs = {
+            k: v
+            for k, v in self.stores.opensearch_docs.items()
+            if v.get("docId") != document_id
+        }
+
+    def health(self) -> bool:
+        return True
 
 
 class FakeVectorBackend:
@@ -107,34 +130,41 @@ class FakeKeywordBackend:
         return []
 
 
-def _build_fake_services(
-    tmp_path: Path, *, fail_qdrant: bool = False
-) -> tuple[Services, FakeStores]:
-    stores = FakeStores()
-    services = Services(
-        pipeline=IngestionPipeline(embedding_provider=FakeEmbeddingProvider(dimensions=16)),
-        storage=DocumentStorage(tmp_path),
-        qdrant_indexer=FakeQdrantIndexer(stores, fail_upsert=fail_qdrant),
-        opensearch_indexer=FakeOpenSearchIndexer(stores),
-        vector_backend=FakeVectorBackend(stores),
-        keyword_backend=FakeKeywordBackend(),
-        answer_generator=SimpleAnswerGenerator(),
-        reranker=None,
-    )
-    return services, stores
-
-
-def _install_overrides(services: Services) -> None:
+def _build_sqlite_session_factory() -> sessionmaker:
+    # StaticPool shares one connection so the background task's session sees the
+    # rows the request committed (in-memory SQLite is otherwise per-connection).
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+def _build_fake_services(
+    tmp_path: Path, *, fail_qdrant: bool = False, fail_opensearch: bool = False
+) -> tuple[Services, FakeStores]:
+    stores = FakeStores()
+    services = Services(
+        pipeline=IngestionPipeline(embedding_provider=FakeEmbeddingProvider(dimensions=16)),
+        storage=DocumentStorage(tmp_path),
+        qdrant_indexer=FakeQdrantIndexer(stores, fail_upsert=fail_qdrant),
+        opensearch_indexer=FakeOpenSearchIndexer(stores, fail_bulk=fail_opensearch),
+        vector_backend=FakeVectorBackend(stores),
+        keyword_backend=FakeKeywordBackend(),
+        answer_generator=SimpleAnswerGenerator(),
+        reranker=None,
+        session_factory=_build_sqlite_session_factory(),
+    )
+    return services, stores
+
+
+def _install_overrides(services: Services) -> None:
+    factory = services.session_factory
 
     def get_session_override() -> object:
-        with session_factory() as session:
+        with factory() as session:
             yield session
 
     app.dependency_overrides[get_session] = get_session_override
@@ -165,12 +195,13 @@ def test_upload_then_list_then_search_round_trip(tmp_path: Path) -> None:
         files={"file": ("notes.md", _MARKDOWN, "text/markdown")},
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 202, response.text
     job = response.json()
-    assert job["status"] == "completed"
+    assert job["status"] == "running"  # heavy work runs in the background
     assert job["document_id"]
-
     document_id = job["document_id"]
+
+    # The background task has run by the time TestClient returns.
     assert stores.collection_ensured
     assert stores.index_ensured
     chunk_id = f"{document_id}:000001"
@@ -217,10 +248,57 @@ def test_store_failure_marks_document_failed(tmp_path: Path) -> None:
         files={"file": ("notes.md", _MARKDOWN, "text/markdown")},
     )
 
-    assert response.status_code == 500, response.text
+    # Accepted for background processing; the failure surfaces in the job status.
+    assert response.status_code == 202, response.text
     listed = client.get("/documents").json()
     assert len(listed) == 1
     assert listed[0]["status"] == "failed"
+
+
+def test_opensearch_failure_cleans_qdrant_orphans(tmp_path: Path) -> None:
+    """A failed ingestion must not leave searchable chunks behind in Qdrant."""
+    services, stores = _build_fake_services(tmp_path, fail_opensearch=True)
+    _install_overrides(services)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        "/documents",
+        files={"file": ("notes.md", _MARKDOWN, "text/markdown")},
+    )
+
+    assert response.status_code == 202, response.text
+    # Qdrant upsert ran before OpenSearch failed; cleanup must remove the orphans.
+    assert stores.qdrant_points == {}, stores.qdrant_points
+    listed = client.get("/documents").json()
+    assert listed[0]["status"] == "failed"
+
+
+def test_delete_document_removes_from_all_stores(tmp_path: Path) -> None:
+    services, stores = _build_fake_services(tmp_path)
+    _install_overrides(services)
+
+    client = TestClient(app)
+    resp = client.post("/documents", files={"file": ("notes.md", _MARKDOWN, "text/markdown")})
+    document_id = resp.json()["document_id"]
+    assert stores.qdrant_points  # points exist after ingestion
+    assert stores.opensearch_docs
+
+    del_resp = client.delete(f"/documents/{document_id}")
+    assert del_resp.status_code == 204, del_resp.text
+
+    assert stores.qdrant_points == {}
+    assert stores.opensearch_docs == {}
+    assert client.get("/documents").json() == []
+    # Deleting again is 404.
+    assert client.delete(f"/documents/{document_id}").status_code == 404
+
+
+def test_delete_unknown_document_returns_404(tmp_path: Path) -> None:
+    services, _ = _build_fake_services(tmp_path)
+    _install_overrides(services)
+
+    client = TestClient(app)
+    assert client.delete("/documents/does-not-exist").status_code == 404
 
 
 def test_search_returns_empty_citations_when_nothing_indexed(tmp_path: Path) -> None:

@@ -1,4 +1,5 @@
 import type { DocumentRead } from "@/lib/api";
+import { DeleteButton } from "@/components/DeleteButton";
 
 export function DocumentList({ documents }: { documents: DocumentRead[] }) {
     if (documents.length === 0) {
@@ -13,6 +14,7 @@ export function DocumentList({ documents }: { documents: DocumentRead[] }) {
                     <p className="muted">
                         {document.original_filename} · {document.status} · v{document.version}
                     </p>
+                    <DeleteButton documentId={document.id} />
                 </article>
             ))}
         </div>

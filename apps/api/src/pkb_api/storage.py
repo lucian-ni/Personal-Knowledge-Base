@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 
@@ -22,3 +23,9 @@ class DocumentStorage:
         path = directory / safe_name
         path.write_bytes(data)
         return path
+
+    def delete(self, document_id: str) -> None:
+        """Remove the document's source directory. No-op if it never existed."""
+        directory = self.docs_path / document_id
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)

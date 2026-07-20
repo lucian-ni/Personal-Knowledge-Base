@@ -58,10 +58,9 @@ def test_openai_compatible_provider_returns_empty_for_no_texts() -> None:
     assert provider.embed([]) == []
 
 
-def test_openai_compatible_provider_calls_endpoint_and_normalizes(monkeypatch) -> None:
-    """Mocks the /embeddings HTTP call: correct URL, auth header, body, and L2 normalization."""
-    import httpx
-
+def test_openai_compatible_provider_calls_endpoint_and_normalizes() -> None:
+    """Mocks the /embeddings HTTP call via an injected client: correct URL, auth header,
+    body, and L2 normalization."""
     captured: dict = {}
 
     class FakeResponse:
@@ -71,13 +70,12 @@ def test_openai_compatible_provider_calls_endpoint_and_normalizes(monkeypatch) -
         def json(self) -> dict:
             return {"data": [{"embedding": [3.0, 4.0]}, {"embedding": [0.0, 5.0]}]}
 
-    def fake_post(url, *, headers=None, json=None, timeout=None):
-        captured["url"] = url
-        captured["headers"] = headers
-        captured["body"] = json
-        return FakeResponse()
-
-    monkeypatch.setattr(httpx, "post", fake_post)
+    class FakeClient:
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["body"] = json
+            return FakeResponse()
 
     provider = OpenAICompatibleEmbeddingProvider(
         base_url="https://embed.example.com/",
@@ -85,6 +83,7 @@ def test_openai_compatible_provider_calls_endpoint_and_normalizes(monkeypatch) -
         model="text-embedding-3-small",
         dimensions=2,
     )
+    provider._client = FakeClient()  # reuse the injected connection instead of httpx.post
     vectors = provider.embed(["hello", "world"])
 
     assert captured["url"] == "https://embed.example.com/embeddings"

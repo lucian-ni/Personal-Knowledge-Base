@@ -76,13 +76,22 @@ class OpenAICompatibleEmbeddingProvider:
         self.model = model
         self.dimensions = dimensions
         self.timeout = timeout
+        self._client: Any = None
+
+    def _ensure_client(self) -> Any:
+        # A shared client reuses the HTTP connection across embed() calls (query
+        # embedding runs on every search). Created lazily so import needs no network.
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.Client(timeout=self.timeout)
+        return self._client
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        import httpx
-
-        response = httpx.post(
+        client = self._ensure_client()
+        response = client.post(
             f"{self.base_url}/embeddings",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json={"input": texts, "model": self.model},

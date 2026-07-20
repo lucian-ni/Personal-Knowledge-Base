@@ -73,7 +73,7 @@ Local-first RAG knowledge base. Three independent stores are intentionally **not
 - **PostgreSQL** - business data only: `documents` (file metadata), `document_chunks` (maps business data to search-index IDs), `ingestion_jobs` (pipeline status). `document_chunks` deliberately stores **no chunk text**.
 - **Qdrant** - embeddings + retrievable chunk payload (vector search).
 - **OpenSearch** - chunk text for BM25 keyword search.
-- **Filesystem** (`storage/docs`, `storage/derived`) - raw source files.
+- **Filesystem** (`storage/docs`) - raw source files.
 
 Chunk text is duplicated into both Qdrant and OpenSearch so retrieval returns ready-to-use context without a Postgres lookup per hit. This split is the central design decision - see `docs/architecture.md`.
 
@@ -105,7 +105,7 @@ When no LLM is configured (`LLM_API_KEY` unset), `SimpleAnswerGenerator` returns
 
 ## Current state
 
-The API endpoints are wired end-to-end. `POST /documents` runs `IngestionService` (convert -> chunk -> embed (bge) -> persist to Postgres + Qdrant + OpenSearch, synchronously) and returns the completed job. `GET /documents` reads from Postgres. `POST /search` runs the real `HybridRetriever`: Qdrant vector + OpenSearch BM25 -> RRF fusion -> `QwenReranker` rerank -> answer. When no LLM is configured `SimpleAnswerGenerator` returns the matched chunks with citations; `LLMAnswerGenerator` is used when `LLM_API_*` are set. Embedding defaults to the local bge model; `OpenAICompatibleEmbeddingProvider` is opt-in. Ingestion is synchronous (no background jobs / polling yet); remaining work is in `docs/implementation-plan.md`.
+The API endpoints are wired end-to-end. `POST /documents` runs `IngestionService` (convert -> chunk -> embed (bge) -> persist to Postgres + Qdrant + OpenSearch) and returns the job immediately (HTTP 202; the pipeline runs in a background task, status flips to ready/failed). `GET /documents` reads from Postgres. `POST /search` runs the real `HybridRetriever`: Qdrant vector + OpenSearch BM25 -> RRF fusion -> `QwenReranker` rerank -> answer. When no LLM is configured `SimpleAnswerGenerator` returns the matched chunks with citations; `LLMAnswerGenerator` is used when `LLM_API_*` are set. Embedding defaults to the local bge model; `OpenAICompatibleEmbeddingProvider` is opt-in. Ingestion is asynchronous: `POST /documents` returns 202 and runs the pipeline in a background task; the web client polls `GET /documents` for `ready`/`failed`. `DELETE /documents/{id}` cascades to all three stores; `POST /search/stream` streams cited answers as SSE. Remaining work is in `docs/implementation-plan.md`.
 
 ## Conventions
 

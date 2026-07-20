@@ -14,19 +14,32 @@ logger = logging.getLogger(__name__)
 
 # OpenSearch index mapping mirrors the ``document`` payload produced by
 # ``build_opensearch_document`` (see packages/ingestion/src/pkb_ingestion/index_contracts.py).
+# Fields are stored at the top level (bulk_index uses the inner ``document`` dict as the
+# ``_source``), so search must query ``text`` (not ``document.text``). The ``text`` and
+# ``title`` fields use the built-in Lucene ``cjk`` analyzer so Chinese BM25 tokenizes by
+# bigram instead of the standard analyzer's poor per-ideogram handling. No plugin is
+# required. An existing local index must be dropped + recreated to pick up a mapping change
+# (``DELETE /<index>`` then re-ingest).
 OPENSEARCH_INDEX_MAPPING: dict[str, Any] = {
+    "settings": {
+        "analysis": {
+            "analyzer": {
+                "cjk": {"type": "cjk"},
+            }
+        }
+    },
     "mappings": {
         "properties": {
             "docId": {"type": "keyword"},
             "chunkId": {"type": "keyword"},
             "chunkIndex": {"type": "integer"},
-            "text": {"type": "text"},
-            "title": {"type": "text"},
+            "text": {"type": "text", "analyzer": "cjk"},
+            "title": {"type": "text", "analyzer": "cjk"},
             "section": {"type": "keyword"},
             "page": {"type": "integer"},
             "checksum": {"type": "keyword"},
         }
-    }
+    },
 }
 
 
@@ -64,6 +77,37 @@ class QdrantIndexer:
                 for point in points
             ],
         )
+
+    def delete_by_document(self, document_id: str) -> None:
+        """Best-effort delete of all points whose payload ``docId`` matches.
+
+        Swallows transport errors so a failed ingestion or a document delete never
+        raises just because Qdrant is unreachable; the Postgres row is still removed.
+        """
+        try:
+            self.client.delete(
+                collection_name=self.collection,
+                points_selector=qmodels.FilterSelector(
+                    filter=qmodels.Filter(
+                        must=[
+                            qmodels.FieldCondition(
+                                key="docId",
+                                match=qmodels.MatchValue(value=document_id),
+                            )
+                        ]
+                    )
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Qdrant delete_by_document failed for %s: %s", document_id, exc)
+
+    def health(self) -> bool:
+        """True if the Qdrant server is reachable (lists collections)."""
+        try:
+            self.client.get_collections()
+            return True
+        except Exception:
+            return False
 
 
 class QdrantVectorBackend:
@@ -118,6 +162,27 @@ class OpenSearchIndexer:
         ]
         helpers.bulk(self.client, actions)
 
+    def delete_by_document(self, document_id: str) -> None:
+        """Best-effort delete of all docs whose ``docId`` matches (keyword term query).
+
+        Swallows transport errors so cleanup never raises when OpenSearch is unreachable.
+        """
+        try:
+            self.client.delete_by_query(
+                index=self.index,
+                body={"query": {"term": {"docId": document_id}}},
+            )
+        except Exception as exc:
+            logger.warning("OpenSearch delete_by_document failed for %s: %s", document_id, exc)
+
+    def health(self) -> bool:
+        """True if the OpenSearch cluster is reachable (cluster info)."""
+        try:
+            self.client.info()
+            return True
+        except Exception:
+            return False
+
 
 class OpenSearchKeywordBackend:
     """Keyword (BM25) search backend over OpenSearch; implements ``KeywordSearchBackend``.
@@ -134,7 +199,7 @@ class OpenSearchKeywordBackend:
             response = self.client.search(
                 index=self.index,
                 body={
-                    "query": {"match": {"document.text": query}},
+                    "query": {"match": {"text": query}},
                     "size": limit,
                 },
             )

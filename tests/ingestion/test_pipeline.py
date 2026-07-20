@@ -42,3 +42,5 @@ ReentrantLock is a reentrant lock.
     assert batch.opensearch_documents[0]["_id"] == "java-concurrency:000001"
     assert batch.chunk_records[0].qdrant_point_id == point_id
     assert batch.chunk_records[0].opensearch_document_id == "java-concurrency:000001"
+    # token_count is a character count (meaningful for CJK; split() would be ~1 for Chinese).
+    assert batch.chunk_records[0].token_count == len("ReentrantLock is a reentrant lock.")

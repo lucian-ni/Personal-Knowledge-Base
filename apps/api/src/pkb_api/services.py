@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from opensearchpy import OpenSearch
@@ -10,6 +12,7 @@ from pkb_ingestion.embeddings import (
 )
 from pkb_ingestion.pipeline import IngestionPipeline
 from qdrant_client import QdrantClient
+from sqlalchemy.orm import Session
 
 from pkb_api.backends import (
     OpenSearchIndexer,
@@ -17,6 +20,7 @@ from pkb_api.backends import (
     QdrantIndexer,
     QdrantVectorBackend,
 )
+from pkb_api.db import SessionLocal
 from pkb_api.retrieval import (
     LLMAnswerGenerator,
     Reranker,
@@ -44,6 +48,10 @@ class Services:
     keyword_backend: OpenSearchKeywordBackend
     answer_generator: SimpleAnswerGenerator | LLMAnswerGenerator
     reranker: Reranker | None
+    # Factory the background ingestion task uses to open its own session (decoupled from
+    # the request's session, which closes when the response is sent). Tests inject a
+    # SQLite factory so the background task writes to the same in-memory DB.
+    session_factory: Callable[[], Session] = SessionLocal
 
 
 def make_embedding_provider(config: Settings) -> EmbeddingProvider:
@@ -106,17 +114,23 @@ def build_services(config: Settings) -> Services:
         keyword_backend=keyword_backend,
         answer_generator=answer_generator,
         reranker=reranker,
+        session_factory=SessionLocal,
     )
 
 
 _services_singleton: Services | None = None
+_services_lock = threading.Lock()
 
 
 def get_services() -> Services:
     """FastAPI dependency returning the lazily-built real services singleton.
 
-    Tests override this via ``app.dependency_overrides[get_services] = ...``."""
+    Thread-safe (sync endpoints run in a Starlette threadpool, so the first concurrent
+    requests could otherwise build services twice). Tests override this via
+    ``app.dependency_overrides[get_services] = ...``."""
     global _services_singleton
     if _services_singleton is None:
-        _services_singleton = build_services(settings)
+        with _services_lock:
+            if _services_singleton is None:
+                _services_singleton = build_services(settings)
     return _services_singleton
