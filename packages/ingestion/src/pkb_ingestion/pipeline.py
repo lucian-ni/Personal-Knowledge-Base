@@ -46,10 +46,10 @@ class IngestionPipeline:
             title=chunk.title,
             section=chunk.section,
             page=chunk.page,
-            # Character count, not whitespace-split "tokens": the embedding model is
-            # bge-small-zh, and Chinese text has no spaces, so split() would yield ~1
-            # for any chunk. Characters are a meaningful size proxy for both CJK and Latin.
-            token_count=len(chunk.text),
+            # Estimated tokens from the chunker's TokenCounter (heuristic by
+            # default: CJK ~1 token/char, Latin ~1/4) - the same budget that sized
+            # the chunk, so the persisted value matches what was embedded.
+            token_count=chunk.token_count,
             checksum=chunk.checksum,
             qdrant_point_id=qdrant_point_id(chunk.chunk_id),
             opensearch_document_id=chunk.chunk_id,

@@ -22,6 +22,7 @@ class Chunk:
     title: str
     section: str | None
     page: int | None
+    token_count: int
     checksum: str
 
 

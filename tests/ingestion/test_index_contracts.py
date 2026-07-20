@@ -11,6 +11,7 @@ def test_qdrant_payload_contains_retrievable_chunk_text() -> None:
         title="Java Concurrency",
         section="Lock",
         page=12,
+        token_count=9,
         checksum="abc123",
     )
 
@@ -33,6 +34,7 @@ def test_opensearch_document_uses_same_stable_chunk_identity() -> None:
         title="Redis",
         section="Networking",
         page=None,
+        token_count=6,
         checksum="def456",
     )
 
