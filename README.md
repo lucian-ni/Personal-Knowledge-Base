@@ -1,7 +1,7 @@
 # Personal Knowledge Base
 
 Local-first RAG personal knowledge base using FastAPI, Next.js, PostgreSQL, Qdrant,
-OpenSearch, Docling, and Docker Compose.
+OpenSearch, PyMuPDF, and Docker Compose.
 
 ## Architecture
 

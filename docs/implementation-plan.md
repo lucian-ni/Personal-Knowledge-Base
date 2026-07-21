@@ -14,7 +14,7 @@ chunks into vector and keyword stores, and answer questions with citations.
 - Frontend workspace managed by `pnpm`.
 - FastAPI health, document, upload, and search endpoint contracts.
 - PostgreSQL SQLAlchemy models and Alembic initial schema.
-- Docling conversion boundary.
+- PyMuPDF PDF->markdown conversion boundary.
 - Markdown chunking with section and page metadata.
 - Local bge-small-zh-v1.5 sentence embedding provider (real semantic embeddings, default).
 - Qdrant and OpenSearch index payload contracts.
@@ -26,7 +26,7 @@ chunks into vector and keyword stores, and answer questions with citations.
 
 The placeholder API endpoints are now wired to real Postgres/Qdrant/OpenSearch and the
 ingestion pipeline. A `POST /documents` upload converts the file to markdown (direct
-read for `.md`/`.txt`, Docling for PDF), runs `IngestionPipeline.build_index_batch`,
+read for `.md`/`.txt`, PyMuPDF for PDF), runs `IngestionPipeline.build_index_batch`,
 and persists chunk rows to Postgres plus vectors/keyword docs to Qdrant/OpenSearch.
 `GET /documents` reads from Postgres. `POST /search` runs the real `HybridRetriever`
 with the live Qdrant/OpenSearch backends. CORS is configured for the web origin.
@@ -35,7 +35,7 @@ with the live Qdrant/OpenSearch backends. CORS is configured for the web origin.
 - Uploaded files stored under `storage/docs/{document_id}/{filename}`.
 - Qdrant collection creation + vector upsert (`QdrantIndexer`).
 - OpenSearch index creation + bulk indexing (`OpenSearchIndexer`).
-- Upload wired to the Docling/markdown ingestion pipeline.
+- Upload wired to the PyMuPDF/markdown ingestion pipeline.
 - `document_chunks` rows persisted from `IndexBatch.chunk_records`.
 - `/search` backed by real `HybridRetriever` backends with graceful degradation
   (returns no hits when a store is unreachable, so the endpoint stays up).

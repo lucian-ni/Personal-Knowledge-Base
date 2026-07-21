@@ -18,8 +18,8 @@ ready-to-use context without an extra PostgreSQL lookup for every chunk hit.
 flowchart TD
     Upload[Upload PDF] --> FileStore[storage/docs]
     Upload --> DocumentRow[PostgreSQL documents]
-    FileStore --> Docling[Docling to Markdown]
-    Docling --> Chunker[Markdown Chunker]
+    FileStore --> PdfConv[PyMuPDF to Markdown]
+    PdfConv --> Chunker[Markdown Chunker]
     Chunker --> Embedding[Embedding Provider]
     Chunker --> ChunkRows[PostgreSQL document_chunks]
     Embedding --> Qdrant[Qdrant Vector Payload]

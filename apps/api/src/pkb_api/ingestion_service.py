@@ -5,8 +5,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from pkb_ingestion.docling_converter import DoclingMarkdownConverter
 from pkb_ingestion.models import ChunkRecord, DocumentArtifact
+from pkb_ingestion.pdf_converter import PdfConverter, PyMuPdfConverter
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -65,10 +65,10 @@ class IngestionService:
     def __init__(
         self,
         services: Services,
-        converter: DoclingMarkdownConverter | None = None,
+        converter: PdfConverter | None = None,
     ) -> None:
         self.services = services
-        self.converter = converter or DoclingMarkdownConverter()
+        self.converter = converter or PyMuPdfConverter()
 
     # -- ingestion -----------------------------------------------------------
 
