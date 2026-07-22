@@ -319,14 +319,15 @@ def test_make_embedding_provider_defaults_to_local() -> None:
     assert isinstance(provider, LocalEmbeddingProvider)
 
 
-def test_make_embedding_provider_falls_back_to_local_when_openai_unconfigured() -> None:
+def test_make_embedding_provider_raises_when_openai_unconfigured() -> None:
     from pkb_api.settings import Settings
-    from pkb_ingestion.embeddings import LocalEmbeddingProvider
 
-    provider = make_embedding_provider(
-        Settings(_env_file=None, embedding_provider="openai", embedding_dimensions=64)
-    )
-    assert isinstance(provider, LocalEmbeddingProvider)
+    # provider=openai with no API credentials raises (no silent fallback to a
+    # different embedding model, which would produce invisibly-different vectors).
+    with pytest.raises(ValueError, match="EMBEDDING_API_KEY"):
+        make_embedding_provider(
+            Settings(_env_file=None, embedding_provider="openai", embedding_dimensions=64)
+        )
 
 
 def test_make_embedding_provider_builds_http_when_configured() -> None:

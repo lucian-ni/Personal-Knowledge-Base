@@ -55,13 +55,30 @@ class Services:
 
 
 def make_embedding_provider(config: Settings) -> EmbeddingProvider:
-    """Select the embedding provider from settings; defaults to the local bge model."""
-    if (
-        config.embedding_provider == "openai"
-        and config.embedding_api_base_url
-        and config.embedding_api_key
-        and config.embedding_model
-    ):
+    """Select the embedding provider from settings.
+
+    ``provider=openai`` requires ``EMBEDDING_API_BASE_URL``, ``EMBEDDING_API_KEY``,
+    and ``EMBEDDING_MODEL`` to all be set; it raises ``ValueError`` if any are
+    missing rather than silently falling back to a local model (a silent switch to a
+    different embedding model would produce invisibly-different vectors and break
+    the Qdrant collection's dimension). Any other value uses the local bge model.
+    """
+    if config.embedding_provider == "openai":
+        missing = [
+            name
+            for name, value in (
+                ("EMBEDDING_API_BASE_URL", config.embedding_api_base_url),
+                ("EMBEDDING_API_KEY", config.embedding_api_key),
+                ("EMBEDDING_MODEL", config.embedding_model),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "EMBEDDING_PROVIDER=openai but "
+                + ", ".join(missing)
+                + " not set; set it/them or use EMBEDDING_PROVIDER=local"
+            )
         return OpenAICompatibleEmbeddingProvider(
             base_url=config.embedding_api_base_url,
             api_key=config.embedding_api_key,
