@@ -75,8 +75,27 @@ def make_embedding_provider(config: Settings) -> EmbeddingProvider:
 
 
 def make_reranker(config: Settings) -> Reranker | None:
-    """Build the cross-encoder reranker, or None when disabled."""
+    """Build the reranker, or None when disabled.
+
+    ``provider == "api"`` calls an Aliyun Model Studio ``/reranks`` endpoint
+    (the ``compatible-api`` path, distinct from embeddings' ``compatible-mode``);
+    ``RERANKER_API_BASE_URL`` must be set explicitly, while the key reuses
+    ``EMBEDDING_API_KEY`` when ``RERANKER_API_KEY`` is empty. Otherwise the local
+    Qwen3-Reranker cross-encoder runs in-process.
+    """
     if not config.reranker_enabled:
+        return None
+    if config.reranker_provider == "api":
+        base_url = config.reranker_api_base_url
+        api_key = config.reranker_api_key or config.embedding_api_key
+        if base_url and api_key and config.reranker_model:
+            from pkb_api.reranker import ApiReranker
+
+            return ApiReranker(
+                base_url=base_url,
+                api_key=api_key,
+                model=config.reranker_model,
+            )
         return None
     from pkb_api.reranker import QwenReranker
 

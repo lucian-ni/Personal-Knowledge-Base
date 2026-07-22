@@ -28,10 +28,16 @@ class Settings(BaseSettings):
     embedding_api_base_url: str | None = None
     embedding_api_key: str | None = None
 
-    # Cross-encoder reranker (Qwen3-Reranker-0.6B). Disable to skip the model
-    # load for fast smoke tests; retrieval then returns RRF-fused hits directly.
+    # Cross-encoder reranker. "local" runs Qwen3-Reranker-0.6B in-process
+    # (default); "api" calls an OpenAI-compatible /rerank endpoint (set
+    # RERANKER_API_*, or leave them empty to reuse EMBEDDING_API_*). The API
+    # reranker degrades to the RRF order when the endpoint is unavailable.
+    # Disable to skip reranking entirely (retrieval returns RRF-fused hits).
     reranker_enabled: bool = True
+    reranker_provider: str = "local"
     reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
+    reranker_api_base_url: str | None = None
+    reranker_api_key: str | None = None
 
     # Retrieval tuning: RRF constant k, and how many hits each backend fetches
     # before reranking.

@@ -9,7 +9,6 @@ from pkb_api.main import app
 from pkb_api.models import Base
 from pkb_api.retrieval import RetrievalHit, SimpleAnswerGenerator
 from pkb_api.services import Services, get_services, make_embedding_provider
-from pkb_api.settings import settings
 from pkb_api.storage import DocumentStorage
 from pkb_ingestion.ids import qdrant_point_id
 from pkb_ingestion.models import QdrantPoint
@@ -312,9 +311,11 @@ def test_search_returns_empty_citations_when_nothing_indexed(tmp_path: Path) -> 
 
 
 def test_make_embedding_provider_defaults_to_local() -> None:
+    from pkb_api.settings import Settings
     from pkb_ingestion.embeddings import LocalEmbeddingProvider
 
-    provider = make_embedding_provider(settings)
+    # _env_file=None isolates the test from a local .env so the real defaults apply.
+    provider = make_embedding_provider(Settings(_env_file=None))
     assert isinstance(provider, LocalEmbeddingProvider)
 
 
@@ -323,7 +324,7 @@ def test_make_embedding_provider_falls_back_to_local_when_openai_unconfigured() 
     from pkb_ingestion.embeddings import LocalEmbeddingProvider
 
     provider = make_embedding_provider(
-        Settings(embedding_provider="openai", embedding_dimensions=64)
+        Settings(_env_file=None, embedding_provider="openai", embedding_dimensions=64)
     )
     assert isinstance(provider, LocalEmbeddingProvider)
 
@@ -333,6 +334,7 @@ def test_make_embedding_provider_builds_http_when_configured() -> None:
     from pkb_ingestion.embeddings import OpenAICompatibleEmbeddingProvider
 
     config = Settings(
+        _env_file=None,
         embedding_provider="openai",
         embedding_dimensions=64,
         embedding_api_base_url="https://embed.example.com",
