@@ -12,6 +12,11 @@ __pycache__/
 dist/
 build/
 
+# IDE / editor
+.idea/
+*.iml
+.vscode/
+
 node_modules/
 .next/
 out/
