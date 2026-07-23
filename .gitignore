@@ -17,6 +17,9 @@ build/
 *.iml
 .vscode/
 
+# Claude Code (local session/plans + settings.local.json)
+.claude/
+
 node_modules/
 .next/
 out/
